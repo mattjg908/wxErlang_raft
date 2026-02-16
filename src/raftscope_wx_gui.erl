@@ -127,12 +127,17 @@ try_new(Fun) ->
 init([]) ->
     wx:new(),
 
-    Frame = wxFrame:new(wx:null(), ?wxID_ANY, "raftscope_wx", [{size, {1200, 750}}]),
+    %% Slightly larger default window so the info panel can show all details
+    %% without needing to scroll.
+    Frame = wxFrame:new(wx:null(), ?wxID_ANY, "raftscope_wx", [{size, {1350, 850}}]),
     Main = mk_panel(Frame, ?wxID_ANY, []),
 
     Canvas = mk_panel(Main, ?wxID_ANY, [{style, ?wxFULL_REPAINT_ON_RESIZE bor ?wxBORDER_NONE}]),
     wxWindow:setBackgroundStyle(Canvas, ?wxBG_STYLE_PAINT),
     Sidebar = mk_panel(Main, ?wxID_ANY, [{style, ?wxBORDER_NONE}]),
+    %% Give the sidebar a sensible minimum width so the info pane can remain
+    %% readable without constantly scrolling.
+    catch wxWindow:setMinSize(Sidebar, {420, -1}),
 
     %% Layout: Canvas expands, Sidebar fixed-ish.
     MainSizer = wxBoxSizer:new(?wxHORIZONTAL),
@@ -143,8 +148,10 @@ init([]) ->
     %% Sidebar layout
     Sizer = wxBoxSizer:new(?wxVERTICAL),
 
-    Info = mk_textctrl(Sidebar, ?wxID_ANY, "", [{style, ?wxTE_MULTILINE bor ?wxTE_READONLY bor ?wxTE_DONTWRAP}, {size, {320, 280}}]),
-    wxSizer:add(Sizer, Info, [{flag, ?wxEXPAND bor ?wxALL}, {proportion, 0}, {border, 8}]),
+    %% Make the info box larger and allow it to expand to fill remaining
+    %% vertical space in the sidebar.
+    Info = mk_textctrl(Sidebar, ?wxID_ANY, "", [{style, ?wxTE_MULTILINE bor ?wxTE_READONLY bor ?wxTE_DONTWRAP}, {size, {420, 520}}]),
+    wxSizer:add(Sizer, Info, [{flag, ?wxEXPAND bor ?wxALL}, {proportion, 1}, {border, 8}]),
 
     BtnGrid = wxFlexGridSizer:new(0, 2, 6, 6),
 
