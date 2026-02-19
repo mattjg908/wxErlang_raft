@@ -563,8 +563,13 @@ draw_links(DC, Positions) ->
       lists:seq(1, ?NUM_SERVERS)).
 
 draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
-    dc_setPen(DC, wxPen:new({60,60,60}, [{width, 1}])),
-    dc_setBrush(DC, wxBrush:new({60,60,60})),
+    SolidPen = wxPen:new({60,60,60}, [{width, 1}]),
+    SolidBrush = wxBrush:new({60,60,60}),
+    %% RaftScope uses a circled-plus glyph for successful replies.
+    OutlinePen = wxPen:new({60,60,60}, [{width, 1}]),
+    %% Use the canvas background color as the fill so this works across
+    %% wx/OTP builds without depending on a transparent-brush constant.
+    HollowBrush = wxBrush:new({245,245,245}),
     lists:foreach(
       fun(Msg) ->
           From = maps:get(from, Msg),
@@ -580,10 +585,32 @@ draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
                   {X2, Y2} = maps:get(To, Positions),
                   X = trunc(X1 + (X2 - X1) * P2),
                   Y = trunc(Y1 + (Y2 - Y1) * P2),
-                  dc_drawCircle(DC, X, Y, 4)
+                  case is_success_reply(Msg) of
+                      true ->
+                          dc_setPen(DC, OutlinePen),
+                          dc_setBrush(DC, HollowBrush),
+                          dc_drawCircle(DC, X, Y, 5),
+                          draw_plus(DC, X, Y, 3);
+                      false ->
+                          dc_setPen(DC, SolidPen),
+                          dc_setBrush(DC, SolidBrush),
+                          dc_drawCircle(DC, X, Y, 4)
+                  end
           end
       end,
       Ms).
+
+is_success_reply(Msg) ->
+    maps:get(direction, Msg, request) =:= reply andalso
+    case maps:get(type, Msg, undefined) of
+        request_vote -> maps:get(granted, Msg, false) =:= true;
+        append_entries -> maps:get(success, Msg, false) =:= true;
+        _ -> false
+    end.
+
+draw_plus(DC, X, Y, HalfLen) ->
+    dc_drawLine(DC, X - HalfLen, Y, X + HalfLen, Y),
+    dc_drawLine(DC, X, Y - HalfLen, X, Y + HalfLen).
 
 draw_servers(DC, #model{servers = Ss}, Positions, Selected) ->
     VisibleLeader = choose_visible_leader(Ss),
