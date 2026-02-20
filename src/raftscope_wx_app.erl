@@ -1,4 +1,5 @@
 -module(raftscope_wx_app).
+
 -behaviour(application).
 
 -export([start/2, stop/1]).

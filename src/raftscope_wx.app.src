@@ -1,10 +1,9 @@
-{application, raftscope_wx,
- [
-  {description, "wxErlang RaftScope-style Raft simulator"},
+{application,
+ raftscope_wx,
+ [{description, "wxErlang RaftScope-style Raft simulator"},
   {vsn, "0.1.0"},
   {registered, []},
   {applications, [kernel, stdlib, wx]},
   {mod, {raftscope_wx_app, []}},
   {env, []},
-  {modules, []}
- ]}.
+  {modules, []}]}.
