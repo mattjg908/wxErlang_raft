@@ -20,6 +20,8 @@
     log = [],                      %% [#entry{}]
     commit_index = 0,              %% 1-based
 
+    election_start = 0,
+    election_timeout = ?ELECTION_TIMEOUT,
     election_alarm = 0,
 
     vote_granted = #{},            %% PeerId => boolean()

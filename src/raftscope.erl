@@ -57,12 +57,21 @@ leader(#model{servers = Servers}) ->
 
 stop(Model, ServerId) ->
     map_server(Model, ServerId, fun(M, S) ->
-        {S#server{state = stopped, election_alarm = 0}, M}
+        Now = M#model.time,
+        {S#server{state = stopped,
+                  election_start = Now,
+                  election_timeout = 0,
+                  election_alarm = 0}, M}
     end).
 
 resume(Model, ServerId) ->
     map_server(Model, ServerId, fun(M, S) ->
-        {S#server{state = follower, election_alarm = make_election_alarm(M#model.time)}, M}
+        Now = M#model.time,
+        Alarm = make_election_alarm(Now),
+        {S#server{state = follower,
+                  election_start = Now,
+                  election_timeout = Alarm - Now,
+                  election_alarm = Alarm}, M}
     end).
 
 restart(Model0, ServerId) ->
@@ -75,7 +84,11 @@ resume_all(Model0) ->
 timeout(Model0, ServerId) ->
     %% Like raft.js: set election_alarm=0 and immediately start an election.
     map_server(Model0, ServerId, fun(M, S0) ->
-        S1 = S0#server{state = follower, election_alarm = 0},
+        Now = M#model.time,
+        S1 = S0#server{state = follower,
+                       election_start = Now,
+                       election_timeout = 0,
+                       election_alarm = 0},
         start_new_election(M, S1)
     end).
 
@@ -195,8 +208,11 @@ start_new_election(M = #model{time = Time}, S) ->
          andalso (S#server.election_alarm =< Time) of
         true ->
             Peers = S#server.peers,
+            Alarm = make_election_alarm(Time),
             S1 = S#server{
-                election_alarm = make_election_alarm(Time),
+                election_start = Time,
+                election_timeout = Alarm - Time,
+                election_alarm = Alarm,
                 term = S#server.term + 1,
                 voted_for = S#server.id,
                 state = candidate,
@@ -211,7 +227,7 @@ start_new_election(M = #model{time = Time}, S) ->
             {S, M}
     end.
 
-become_leader(M, S) ->
+become_leader(M = #model{time = Time}, S) ->
     Votes = count_true(maps:values(S#server.vote_granted)) + 1,
     case S#server.state =:= candidate andalso Votes > (?NUM_SERVERS div 2) of
         true ->
@@ -222,6 +238,8 @@ become_leader(M, S) ->
                 next_index = make_map(Peers, LogLen + 1),
                 rpc_due = make_map(Peers, ?INF),
                 heartbeat_due = make_map(Peers, 0),
+                election_start = Time,
+                election_timeout = 0,
                 election_alarm = ?INF
             },
             {S1, M};
@@ -359,9 +377,13 @@ handle_request_vote_request(M0, S0, Req) ->
     S2 =
         case Granted of
             true ->
+                Now = M1#model.time,
+                Alarm = make_election_alarm(Now),
                 S1#server{
                     voted_for = maps:get(from, Req),
-                    election_alarm = make_election_alarm(M1#model.time)
+                    election_start = Now,
+                    election_timeout = Alarm - Now,
+                    election_alarm = Alarm
                 };
             false ->
                 S1
@@ -399,7 +421,12 @@ handle_append_entries_request(M0, S0, Req) ->
                 {false, 0, S1};
             true ->
                 %% Become follower, reset election alarm
-                Sx = S1#server{state = follower, election_alarm = make_election_alarm(M1#model.time)},
+                Now = M1#model.time,
+                Alarm = make_election_alarm(Now),
+                Sx = S1#server{state = follower,
+                               election_start = Now,
+                               election_timeout = Alarm - Now,
+                               election_alarm = Alarm},
                 PrevIndex = maps:get(prev_index, Req),
                 PrevTerm  = maps:get(prev_term, Req),
                 LogOk =
@@ -453,6 +480,7 @@ handle_append_entries_reply(M0, S0, Reply) ->
 %% --- Helpers ----------------------------------------------------------------
 
 server(Id, Peers) ->
+    Alarm = make_election_alarm(0),
     #server{
         id = Id,
         peers = Peers,
@@ -461,7 +489,9 @@ server(Id, Peers) ->
         voted_for = undefined,
         log = [],
         commit_index = 0,
-        election_alarm = make_election_alarm(0),
+        election_start = 0,
+        election_timeout = Alarm,
+        election_alarm = Alarm,
         vote_granted = make_map(Peers, false),
         match_index = make_map(Peers, 0),
         next_index  = make_map(Peers, 1),
@@ -538,17 +568,25 @@ maybe_step_down(M, S, IncomingTerm) ->
 
 step_down(#model{time = Time}, S, NewTerm) ->
     Alarm0 = S#server.election_alarm,
-    Alarm1 =
-        case (Alarm0 =< Time) orelse (Alarm0 =:= ?INF) of
-            true  -> make_election_alarm(Time);
-            false -> Alarm0
-        end,
-    S#server{
-        term = NewTerm,
-        state = follower,
-        voted_for = undefined,
-        election_alarm = Alarm1
-    }.
+    case (Alarm0 =< Time) orelse (Alarm0 =:= ?INF) of
+        true ->
+            Alarm1 = make_election_alarm(Time),
+            S#server{
+                term = NewTerm,
+                state = follower,
+                voted_for = undefined,
+                election_start = Time,
+                election_timeout = Alarm1 - Time,
+                election_alarm = Alarm1
+            };
+        false ->
+            S#server{
+                term = NewTerm,
+                state = follower,
+                voted_for = undefined,
+                election_alarm = Alarm0
+            }
+    end.
 
 send_message(M = #model{time = Now, messages = Msgs}, Msg0) ->
     Lat = ?MIN_RPC_LATENCY + trunc(rand:uniform() * (?MAX_RPC_LATENCY - ?MIN_RPC_LATENCY)),
@@ -574,7 +612,12 @@ map_server(Model0 = #model{servers = Servers0}, ServerId, Fun) ->
 adjust_alarm(Model0 = #model{servers = Servers0}, Pred, F) ->
     Servers1 =
         [case Pred(S#server.election_alarm) of
-             true  -> S#server{election_alarm = F(S#server.election_alarm)};
+             true  ->
+                 OldA = S#server.election_alarm,
+                 NewA = F(OldA),
+                 T0 = NewA - S#server.election_start,
+                 T1 = erlang:max(1, T0),
+                 S#server{election_timeout = T1, election_alarm = NewA};
              false -> S
          end || S <- Servers0],
     Model0#model{servers = Servers1}.

@@ -581,7 +581,7 @@ draw_plus(DC, X, Y, HalfLen) ->
     dc_drawLine(DC, X - HalfLen, Y, X + HalfLen, Y),
     dc_drawLine(DC, X, Y - HalfLen, X, Y + HalfLen).
 
-draw_servers(DC, #model{servers = Ss}, Positions, Selected) ->
+draw_servers(DC, #model{time = Now, servers = Ss}, Positions, Selected) ->
     VisibleLeader = choose_visible_leader(Ss),
     lists:foreach(
       fun(S) ->
@@ -601,6 +601,7 @@ draw_servers(DC, #model{servers = Ss}, Positions, Selected) ->
           dc_drawCircle(DC, X, Y, Radius),
 
           maybe_draw_stopped_overlay(DC, State0, X, Y, Radius),
+          maybe_draw_countdown_arc(DC, S, State, Now, X, Y, Radius, PenW),
 
           %% Labels (closer to the RaftScope demo)
           dc_setTextForeground(DC, {20,20,20}),
@@ -633,16 +634,18 @@ server_style(State, IsSelected) ->
     %% {Fill, Outline, PenWidth}
     FillFollower = {150, 180, 230},
     FillCandidate = {245, 230, 170},
+    FillLeader = {190, 160, 240},
     Fill =
         case State of
             stopped -> {190, 190, 190};
+            leader -> FillLeader;
             candidate -> FillCandidate;
             _ -> FillFollower
         end,
 
     {Outline, W0} =
         case State of
-            leader -> {{240, 190, 60}, 5};     %% gold ring
+            leader -> {{110, 110, 110}, 2};
             candidate -> {{80, 80, 80}, 3};
             follower -> {{110, 110, 110}, 2};
             stopped -> {{160, 0, 0}, 3};
@@ -666,6 +669,138 @@ maybe_draw_stopped_overlay(DC, State0, X, Y, Radius) ->
         _ ->
             ok
     end.
+
+maybe_draw_countdown_arc(DC, S, State, Now, X, Y, Radius, PenW) ->
+    case countdown_spec(S, State, Now) of
+        none -> ok;
+        {Frac, Col, W} when Frac =< 0.0 ->
+            _ = {Col, W},
+            ok;
+        {Frac, Col, W} ->
+            R2 = Radius - erlang:max(2, PenW div 2) - 1,
+            dc_setPen(DC, wxPen:new(Col, [{width, W}])),
+            draw_progress_arc(DC, X, Y, R2, Frac)
+    end.
+
+countdown_spec(S, State, Now) ->
+    case State of
+        stopped ->
+            none;
+        leader ->
+            case leader_next_due(S, Now) of
+                none -> none;
+                {Due, Period} ->
+                    Frac = fraction(Now, Due - Period, Period),
+                    {Frac, {70, 70, 70}, 4}
+            end;
+        candidate ->
+            case candidate_next_due(S, Now) of
+                none -> none;
+                {_Due, Start, Period} ->
+                    Frac = fraction(Now, Start, Period),
+                    {Frac, {70, 70, 70}, 4}
+            end;
+        _ ->
+            case election_next_due(S, Now) of
+                none -> none;
+                {_Due, Start, Period} ->
+                    Frac = fraction(Now, Start, Period),
+                    {Frac, {70, 70, 70}, 4}
+            end
+    end.
+
+election_next_due(S, _Now) ->
+    Due = S#server.election_alarm,
+    Start = S#server.election_start,
+    Period = S#server.election_timeout,
+    case Due =:= ?INF orelse Period =:= 0 of
+        true -> none;
+        false -> {Due, Start, erlang:max(1, Period)}
+    end.
+
+candidate_next_due(S, Now) ->
+    RpcDue0 = min_map_value(S#server.rpc_due),
+    RpcCand =
+        case RpcDue0 of
+            none -> none;
+            RpcDue -> {RpcDue, RpcDue - ?RPC_TIMEOUT, ?RPC_TIMEOUT}
+        end,
+    ElectCand = election_next_due(S, Now),
+    pick_earlier3(RpcCand, ElectCand).
+
+pick_earlier3(none, Best) -> Best;
+pick_earlier3(Cand, none) -> Cand;
+pick_earlier3({Due, _Start, _Period} = Cand, {BestDue, _BestStart, _BestPeriod} = Best) ->
+    case Due < BestDue of
+        true -> Cand;
+        false -> Best
+    end.
+
+leader_next_due(S, _Now) ->
+    LogLen = length(S#server.log),
+    Peers = S#server.peers,
+    HbPeriod = ?ELECTION_TIMEOUT div 2,
+    lists:foldl(
+      fun(Peer, Best) ->
+          HbDue = maps:get(Peer, S#server.heartbeat_due, ?INF),
+          NextIdx = maps:get(Peer, S#server.next_index, LogLen + 1),
+          RpcDue = maps:get(Peer, S#server.rpc_due, ?INF),
+          NeedsReplicate = NextIdx =< LogLen,
+          {Due, Period} =
+              case NeedsReplicate of
+                  true ->
+                      if HbDue =< RpcDue -> {HbDue, HbPeriod}; true -> {RpcDue, ?RPC_TIMEOUT} end;
+                  false ->
+                      {HbDue, HbPeriod}
+              end,
+          pick_earlier({Due, Period}, Best)
+      end,
+      none,
+      Peers).
+
+pick_earlier({Due, _Period}, Best) when Due =:= none; Due =:= ?INF -> Best;
+pick_earlier(Cand, none) -> Cand;
+pick_earlier({Due, _Period} = Cand, {BestDue, _BestPeriod} = Best) ->
+    case Due < BestDue of
+        true -> Cand;
+        false -> Best
+    end.
+
+min_map_value(Map) ->
+    Vs = [V || V <- maps:values(Map), V =/= ?INF],
+    case Vs of
+        [] -> none;
+        _ -> lists:min(Vs)
+    end.
+
+fraction(Now, Start0, Period0) ->
+    Period = erlang:max(1, Period0),
+    Start = erlang:max(0, Start0),
+    clamp((Now - Start) / Period, 0.0, 1.0).
+
+draw_progress_arc(_DC, _X, _Y, _R, Frac) when Frac =< 0.0 -> ok;
+draw_progress_arc(DC, X, Y, R, Frac0) ->
+    Frac = clamp(Frac0, 0.0, 1.0),
+    StartA = -math:pi() / 2,
+    EndA = StartA + (2.0 * math:pi() * Frac),
+    Steps = erlang:max(6, trunc(64 * Frac)),
+    Step = (EndA - StartA) / Steps,
+    {X0, Y0} = arc_point(X, Y, R, StartA),
+    lists:foldl(
+      fun(I, {PX, PY}) ->
+          A = StartA + Step * I,
+          {NX, NY} = arc_point(X, Y, R, A),
+          dc_drawLine(DC, PX, PY, NX, NY),
+          {NX, NY}
+      end,
+      {X0, Y0},
+      lists:seq(1, Steps)),
+    ok.
+
+arc_point(CX, CY, R, A) ->
+    X = CX + trunc(R * math:cos(A)),
+    Y = CY + trunc(R * math:sin(A)),
+    {X, Y}.
 
 draw_log(DC, S, X, Y0) ->
     Log = S#server.log,
