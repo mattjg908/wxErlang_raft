@@ -12,21 +12,9 @@
 -record(st, {
     frame,
     canvas,
-    sidebar,
     info_txt,
-
     btn_run,
-    btn_step,
-    btn_client,
-    btn_timeout,
-    btn_stop,
-    btn_resume,
-    btn_restart,
-    btn_align,
-    btn_spread,
-    speed_slider,
 
-    tick_ref = undefined,
     running = true,
     speed = 20,            %% 1..200
     selected = 1,
@@ -199,24 +187,13 @@ init([]) ->
     wxFrame:show(Frame),
 
     %% Drive simulation via erlang:send_after/3
-    TickRef = erlang:send_after(16, self(), gui_tick),
+    _ = erlang:send_after(16, self(), gui_tick),
 
     St0 = #st{
         frame = Frame,
         canvas = Canvas,
-        sidebar = Sidebar,
         info_txt = Info,
-        btn_run = BtnRun,
-        btn_step = BtnStep,
-        btn_client = BtnClient,
-        btn_timeout = BtnTimeout,
-        btn_stop = BtnStop,
-        btn_resume = BtnResume,
-        btn_restart = BtnRestart,
-        btn_align = BtnAlign,
-        btn_spread = BtnSpread,
-        speed_slider = Speed,
-        tick_ref = TickRef
+        btn_run = BtnRun
     },
 
     St1 = refresh_info(St0),
@@ -243,53 +220,40 @@ handle_event(#wx{id = ?ID_STEP, event = #wxCommand{type = command_button_clicked
     {noreply, St1#st{running = false}};
 
 handle_event(#wx{id = ?ID_CLIENT, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model0 = St#st.model,
-    Model1 =
-        case raftscope:leader(Model0) of
-            {LeaderId, _Term} ->
-                raftscope:client_request(Model0, LeaderId);
-            none ->
-                Model0
-        end,
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 =
+        apply_model(St, fun(Model0) ->
+            case raftscope:leader(Model0) of
+                {LeaderId, _Term} ->
+                    raftscope:client_request(Model0, LeaderId);
+                none ->
+                    Model0
+            end
+        end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_TIMEOUT, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:timeout(St#st.model, St#st.selected),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:timeout(M, St#st.selected) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_STOP, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:stop(St#st.model, St#st.selected),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:stop(M, St#st.selected) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_RESUME, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:resume(St#st.model, St#st.selected),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:resume(M, St#st.selected) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_RESTART, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:restart(St#st.model, St#st.selected),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:restart(M, St#st.selected) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_ALIGN, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:align_timers(St#st.model),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:align_timers(M) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_SPREAD, event = #wxCommand{type = command_button_clicked}}, St) ->
-    Model1 = raftscope:spread_timers(St#st.model),
-    St1 = St#st{model = Model1},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    St1 = apply_model(St, fun(M) -> raftscope:spread_timers(M) end),
+    {noreply, St1};
 
 handle_event(#wx{id = ?ID_SPEED, event = #wxCommand{type = command_slider_updated, commandInt = V}}, St) ->
     {noreply, St#st{speed = V}};
@@ -315,12 +279,11 @@ handle_sync_event(_Ev, _WxObj, _St) ->
     ok.
 
 handle_info(gui_tick, St) ->
-    TickRef = erlang:send_after(16, self(), gui_tick),
-    St0 = St#st{tick_ref = TickRef},
+    _ = erlang:send_after(16, self(), gui_tick),
     St1 =
-        case St0#st.running of
-            true -> do_tick(St0);
-            false -> St0
+        case St#st.running of
+            true -> do_tick(St);
+            false -> St
         end,
     {noreply, St1};
 
@@ -335,6 +298,12 @@ code_change(_OldVsn, St, _Extra) ->
     {ok, St}.
 
 %% --- Tick & UI helpers ------------------------------------------------------
+
+apply_model(St, Fun) ->
+    Model1 = Fun(St#st.model),
+    St1 = St#st{model = Model1},
+    wxWindow:refresh(St#st.canvas),
+    refresh_info(St1).
 
 do_tick(St) ->
     %% Slow down simulated time so humans can follow RPCs and elections.
@@ -700,14 +669,17 @@ maybe_draw_stopped_overlay(DC, State0, X, Y, Radius) ->
 
 draw_log(DC, S, X, Y0) ->
     Log = S#server.log,
+    LogLen = length(Log),
     Commit = S#server.commit_index,
     MaxShow = 16,
     Show =
-        case length(Log) of
+        case LogLen of
             0 -> [];
-            Len ->
-                lists:sublist(Log, erlang:max(1, Len - MaxShow + 1), erlang:min(MaxShow, Len))
+            _ ->
+                lists:sublist(Log, erlang:max(1, LogLen - MaxShow + 1), erlang:min(MaxShow, LogLen))
         end,
+    ShowLen = length(Show),
+    BaseIndex = LogLen - ShowLen,
     StartX = X - 8*MaxShow,
     BoxW = 10,
     BoxH = 10,
@@ -719,7 +691,7 @@ draw_log(DC, S, X, Y0) ->
           dc_setBrush(DC, wxBrush:new(Col)),
           Xi = StartX + (K-1)*BoxW,
           dc_drawRectangle(DC, Xi, Y0, BoxW-1, BoxH-1),
-          Index = (length(Log) - length(Show)) + K,
+          Index = BaseIndex + K,
           case Index =< Commit andalso Commit > 0 of
               true ->
                   dc_setPen(DC, wxPen:new({0,0,0}, [{width, 1}])),
@@ -728,7 +700,7 @@ draw_log(DC, S, X, Y0) ->
                   ok
           end
       end,
-      lists:zip(Show, lists:seq(1, length(Show)))).
+      lists:zip(Show, lists:seq(1, ShowLen))).
 
 role_short(leader) -> "L";
 role_short(candidate) -> "C";

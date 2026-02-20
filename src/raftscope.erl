@@ -212,7 +212,7 @@ start_new_election(M = #model{time = Time}, S) ->
     end.
 
 become_leader(M, S) ->
-    Votes = count_true(map_values(S#server.vote_granted)) + 1,
+    Votes = count_true(maps:values(S#server.vote_granted)) + 1,
     case S#server.state =:= candidate andalso Votes > (?NUM_SERVERS div 2) of
         true ->
             LogLen = length(S#server.log),
@@ -231,7 +231,7 @@ become_leader(M, S) ->
 
 advance_commit_index(M, S = #server{state = leader}) ->
     LogLen = length(S#server.log),
-    Match = map_values(S#server.match_index) ++ [LogLen],
+    Match = maps:values(S#server.match_index) ++ [LogLen],
     Sorted = lists:sort(Match),
     NthIndex = (?NUM_SERVERS div 2) + 1,
     N = case length(Sorted) >= NthIndex of
@@ -486,9 +486,6 @@ seed_rand() ->
 
 make_map(Keys, Value) ->
     maps:from_list([{K, Value} || K <- Keys]).
-
-map_values(M) ->
-    [V || {_K, V} <- maps:to_list(M)].
 
 count_true(Bools) ->
     lists:foldl(fun(B, Acc) -> if B -> Acc + 1; true -> Acc end end, 0, Bools).
