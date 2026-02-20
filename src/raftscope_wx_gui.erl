@@ -111,6 +111,23 @@ try_new(Fun) ->
     end.
 
 
+%% Ensure the info pane uses a fixed-width font so tabular data aligns.
+%% This is UI-only; failures fall back to the default font.
+set_info_mono_font(Txt) ->
+    %% Prefer a monospace family; exact support varies by platform/wx build.
+    FontRes =
+        try_new(fun() ->
+            wxFont:new(10, ?wxFONTFAMILY_MODERN, ?wxFONTSTYLE_NORMAL, ?wxFONTWEIGHT_NORMAL)
+        end),
+    case FontRes of
+        {ok, Font} ->
+            catch wxWindow:setFont(Txt, Font),
+            ok;
+        _ ->
+            ok
+    end.
+
+
 
 init([]) ->
     wx:new(),
@@ -139,6 +156,9 @@ init([]) ->
     %% Make the info box larger and allow it to expand to fill remaining
     %% vertical space in the sidebar.
     Info = mk_textctrl(Sidebar, ?wxID_ANY, "", [{style, ?wxTE_MULTILINE bor ?wxTE_READONLY bor ?wxTE_DONTWRAP}, {size, {420, 520}}]),
+    %% Use a fixed-width font in the info pane so the servers table columns
+    %% align reliably across platforms.
+    set_info_mono_font(Info),
     wxSizer:add(Sizer, Info, [{flag, ?wxEXPAND bor ?wxALL}, {proportion, 1}, {border, 8}]),
 
     BtnGrid = wxFlexGridSizer:new(0, 2, 6, 6),
@@ -336,20 +356,36 @@ refresh_info(St) ->
     St.
 
 servers_summary(Ss, Now) ->
-    Header = "   id   state       term  vote  log  commit  elect_due(us)\n",
+    %% Use fixed-width string columns (rendered with a monospace font) so all
+    %% values land under their respective headers.
+    %% NOTE: keep the elect_due(us) column wide enough for the header itself
+    %% (length 13) so data stays directly under the header.
+    Fmt = "  ~-4s ~-10s ~4s ~4s ~3s ~6s ~13s~n",
+    Header = io_lib:format(Fmt, ["id", "state", "term", "vote", "log", "commit", "elect_due(us)"]),
     Rows =
         lists:map(
           fun(S) ->
-	              %% io_lib:format does not accept a negative field width for ~p.
-	              %% Use a left-justified string for the state column instead.
-	              io_lib:format("  S~p   ~-10s  ~4B  ~4p  ~3B  ~6B  ~10B~n",
-	                            [S#server.id,
-	                             atom_to_list(S#server.state),
-                             S#server.term,
-                             S#server.voted_for,
-                             length(S#server.log),
-                             S#server.commit_index,
-                             erlang:max(0, S#server.election_alarm - Now)])
+              Id = lists:flatten(io_lib:format("S~p", [S#server.id])),
+              State = atom_to_list(S#server.state),
+              Term = integer_to_list(S#server.term),
+              Vote =
+                  case S#server.voted_for of
+                      undefined -> "-";
+                      V when is_integer(V) -> integer_to_list(V);
+                      V -> lists:flatten(io_lib:format("~p", [V]))
+                  end,
+              LogLen = integer_to_list(length(S#server.log)),
+              Commit = integer_to_list(S#server.commit_index),
+              ElectDue =
+                  case S#server.state of
+                      leader -> "**********";
+                      _ ->
+                          case S#server.election_alarm of
+                              A when A >= ?INF -> "**********";
+                              _ -> integer_to_list(erlang:max(0, S#server.election_alarm - Now))
+                          end
+                  end,
+              io_lib:format(Fmt, [Id, State, Term, Vote, LogLen, Commit, ElectDue])
           end,
           Ss),
     lists:flatten([Header | Rows]).
