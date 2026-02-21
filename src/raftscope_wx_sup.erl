@@ -17,7 +17,7 @@ init([]) ->
     Child =
         #{id => raftscope_wx_gui,
           start => {raftscope_wx_gui, start_link, []},
-          restart => permanent,
+          restart => temporary,
           shutdown => 5000,
           type => worker,
           modules => [raftscope_wx_gui]},
