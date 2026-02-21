@@ -28,4 +28,8 @@
 -record(model,
         {time = 0,                      %% microseconds
          servers = [],                  %% [#server{}]
-         messages = []}).                  %% [map()]
+         messages = [],                 %% [map()]
+         %% Network partitions / link cuts.
+         %% Keys are {MinId, MaxId} for undirected links.
+         %% If a key exists, communication on that link is dropped.
+         cut_links = #{}}).

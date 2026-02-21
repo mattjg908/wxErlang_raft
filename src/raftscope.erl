@@ -6,7 +6,44 @@
 -include_lib("raftscope_wx/include/raftscope.hrl").
 
 -export([new/0, tick/2, tick_n/3, update/1, leader/1, stop/2, resume/2, restart/2,
-         resume_all/1, timeout/2, client_request/2, spread_timers/1, align_timers/1]).
+         resume_all/1, timeout/2, client_request/2, spread_timers/1, align_timers/1, is_link_cut/3,
+         cut_links/1, cut_link/3, heal_link/3, toggle_link/3, heal_all_links/1]).
+
+         %% Network partitions / net splits
+
+%% --- Network partitions (link cuts) ----------------------------------------
+
+cut_links(#model{cut_links = Cuts}) ->
+    maps:keys(Cuts).
+
+is_link_cut(#model{cut_links = Cuts}, A, B) when is_integer(A), is_integer(B) ->
+    Key = norm_link(A, B),
+    maps:is_key(Key, Cuts).
+
+cut_link(M0 = #model{cut_links = Cuts0}, A, B) ->
+    Key = norm_link(A, B),
+    M0#model{cut_links = maps:put(Key, true, Cuts0)}.
+
+heal_link(M0 = #model{cut_links = Cuts0}, A, B) ->
+    Key = norm_link(A, B),
+    M0#model{cut_links = maps:remove(Key, Cuts0)}.
+
+toggle_link(M0 = #model{cut_links = Cuts0}, A, B) ->
+    Key = norm_link(A, B),
+    case maps:is_key(Key, Cuts0) of
+        true ->
+            M0#model{cut_links = maps:remove(Key, Cuts0)};
+        false ->
+            M0#model{cut_links = maps:put(Key, true, Cuts0)}
+    end.
+
+heal_all_links(M0) ->
+    M0#model{cut_links = #{}}.
+
+norm_link(A, B) when A =< B ->
+    {A, B};
+norm_link(A, B) ->
+    {B, A}.
 
 %% --- Public API -------------------------------------------------------------
 
@@ -635,9 +672,17 @@ step_down(#model{time = Time}, S, NewTerm) ->
     end.
 
 send_message(M = #model{time = Now, messages = Msgs}, Msg0) ->
-    Lat = ?MIN_RPC_LATENCY + trunc(rand:uniform() * (?MAX_RPC_LATENCY - ?MIN_RPC_LATENCY)),
-    Msg = Msg0#{send_time => Now, recv_time => Now + Lat},
-    M#model{messages = [Msg | Msgs]}.
+    %% Net split simulation: if the link is cut, drop the message.
+    From = maps:get(from, Msg0),
+    To = maps:get(to, Msg0),
+    case is_link_cut(M, From, To) of
+        true ->
+            M;
+        false ->
+            Lat = ?MIN_RPC_LATENCY + trunc(rand:uniform() * (?MAX_RPC_LATENCY - ?MIN_RPC_LATENCY)),
+            Msg = Msg0#{send_time => Now, recv_time => Now + Lat},
+            M#model{messages = [Msg | Msgs]}
+    end.
 
 map_server(Model0 = #model{servers = Servers0}, ServerId, Fun) ->
     {Servers1, Model1} =

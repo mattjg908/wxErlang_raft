@@ -30,6 +30,7 @@
 -define(ID_ALIGN, 1008).
 -define(ID_SPREAD, 1009).
 -define(ID_SPEED, 1010).
+-define(ID_HEALALL, 1011).
 
 start_link() ->
     %% wx_object:start_link/* returns a wxWindow (wx_ref), not {ok,Pid}.
@@ -181,6 +182,7 @@ init([]) ->
     BtnRestart = mk_button(Sidebar, ?ID_RESTART, "Restart (selected)"),
     BtnAlign = mk_button(Sidebar, ?ID_ALIGN, "Align timers"),
     BtnSpread = mk_button(Sidebar, ?ID_SPREAD, "Spread timers"),
+    BtnHealAll = mk_button(Sidebar, ?ID_HEALALL, "Heal all links"),
 
     lists:foreach(fun(B) -> wxSizer:add(BtnGrid, B, [{flag, ?wxEXPAND}, {proportion, 1}]) end,
                   [BtnRun,
@@ -191,7 +193,8 @@ init([]) ->
                    BtnResume,
                    BtnRestart,
                    BtnAlign,
-                   BtnSpread]),
+                   BtnSpread,
+                   BtnHealAll]),
 
     wxSizer:add(Sizer,
                 BtnGrid,
@@ -227,6 +230,7 @@ init([]) ->
                    {BtnRestart, command_button_clicked},
                    {BtnAlign, command_button_clicked},
                    {BtnSpread, command_button_clicked},
+                   {BtnHealAll, command_button_clicked},
                    {Speed, command_slider_updated}]),
 
     wxFrame:show(Frame),
@@ -300,6 +304,10 @@ handle_event(#wx{id = ?ID_SPREAD, event = #wxCommand{type = command_button_click
              St) ->
     St1 = apply_model(St, fun(M) -> raftscope:spread_timers(M) end),
     {noreply, St1};
+handle_event(#wx{id = ?ID_HEALALL, event = #wxCommand{type = command_button_clicked}},
+             St) ->
+    St1 = apply_model(St, fun(M) -> raftscope:heal_all_links(M) end),
+    {noreply, St1};
 handle_event(#wx{id = ?ID_SPEED,
                  event = #wxCommand{type = command_slider_updated, commandInt = V}},
              St) ->
@@ -309,10 +317,19 @@ handle_event(#wx{event =
                               x = X,
                               y = Y}},
              St) ->
-    Sel = pick_server({X, Y}, canvas_geometry(St#st.canvas), St#st.selected),
-    St1 = St#st{selected = Sel},
-    wxWindow:refresh(St#st.canvas),
-    {noreply, refresh_info(St1)};
+    Geo = canvas_geometry(St#st.canvas),
+    %% First, try to click a link (net split simulation). If no link was hit,
+    %% fall back to selecting a server node.
+    case pick_link({X, Y}, Geo, St#st.model) of
+        {A, B} ->
+            St1 = apply_model(St, fun(M) -> raftscope:toggle_link(M, A, B) end),
+            {noreply, St1};
+        none ->
+            Sel = pick_server({X, Y}, Geo, St#st.selected),
+            St1 = St#st{selected = Sel},
+            wxWindow:refresh(St#st.canvas),
+            {noreply, refresh_info(St1)}
+    end;
 handle_event(#wx{event = #wxPaint{}}, St) ->
     %% paint is handled in handle_sync_event/3 (callback)
     {noreply, St};
@@ -365,7 +382,8 @@ do_tick(St) ->
 refresh_info(St) ->
     #model{time = T,
            servers = Ss,
-           messages = Ms} =
+           messages = Ms,
+           cut_links = Cuts} =
         St#st.model,
     Leader0 = raftscope:leader(St#st.model),
     Sel = St#st.selected,
@@ -378,11 +396,13 @@ refresh_info(St) ->
                 lists:flatten(
                     io_lib:format("S~p (term ~p)", [LId, LTerm]))
         end,
+    CutsTxt = cuts_text(Cuts),
     Txt =
-        io_lib:format("time: ~p us~nleader: ~s~nmessages_in_flight: ~p~n~nselected: S~p~nstate: ~p~nterm: ~p~nvoted_for: ~p~nlog_len: ~p~ncommit_index: ~p~nelection_due_in: ~p us~n~nservers:~n~s",
+        io_lib:format("time: ~p us~nleader: ~s~nmessages_in_flight: ~p~nnet_cuts: ~s~n~nselected: S~p~nstate: ~p~nterm: ~p~nvoted_for: ~p~nlog_len: ~p~ncommit_index: ~p~nelection_due_in: ~p us~n~nservers:~n~s",
                       [T,
                        LeaderTxt,
                        length(Ms),
+                       CutsTxt,
                        Sel,
                        SelS#server.state,
                        SelS#server.term,
@@ -393,6 +413,20 @@ refresh_info(St) ->
                        servers_summary(Ss, T)]),
     wxTextCtrl:setValue(St#st.info_txt, lists:flatten(Txt)),
     St.
+
+cuts_text(Cuts) when is_map(Cuts) ->
+    Keys =
+        lists:sort(
+            maps:keys(Cuts)),
+    cuts_text(Keys);
+cuts_text([]) ->
+    "none";
+cuts_text(Keys) when is_list(Keys) ->
+    Strs =
+        [lists:flatten(
+             io_lib:format("S~p-S~p", [A, B]))
+         || {A, B} <- Keys],
+    string:join(Strs, ", ").
 
 servers_summary(Ss, Now) ->
     %% Use fixed-width string columns (rendered with a monospace font) so all
@@ -593,7 +627,7 @@ draw(St) ->
 
         Positions = server_positions(CX, CY, R),
 
-        draw_links(DC, Positions),
+        draw_links(DC, Positions, St#st.model),
         draw_messages(DC, St#st.model, Positions),
         draw_servers(DC, St#st.model, Positions, St#st.selected)
     after
@@ -618,14 +652,23 @@ server_positions(CX, CY, R) ->
                 #{},
                 lists:seq(1, N)).
 
-draw_links(DC, Positions) ->
-    dc_setPen(DC, wxPen:new({210, 210, 210}, [{width, 1}])),
+draw_links(DC, Positions, Model) ->
+    NormalPen = wxPen:new({210, 210, 210}, [{width, 1}]),
+    CutPen = wxPen:new({160, 0, 0}, [{width, 3}]),
     lists:foreach(fun(I) ->
                      {X1, Y1} = maps:get(I, Positions),
                      lists:foreach(fun(J) ->
                                       if J > I ->
                                              {X2, Y2} = maps:get(J, Positions),
-                                             dc_drawLine(DC, X1, Y1, X2, Y2);
+                                             case raftscope:is_link_cut(Model, I, J) of
+                                                 true ->
+                                                     dc_setPen(DC, CutPen),
+                                                     dc_drawLine(DC, X1, Y1, X2, Y2),
+                                                     draw_link_cut_marker(DC, X1, Y1, X2, Y2);
+                                                 false ->
+                                                     dc_setPen(DC, NormalPen),
+                                                     dc_drawLine(DC, X1, Y1, X2, Y2)
+                                             end;
                                          true ->
                                              ok
                                       end
@@ -633,6 +676,13 @@ draw_links(DC, Positions) ->
                                    lists:seq(1, ?NUM_SERVERS))
                   end,
                   lists:seq(1, ?NUM_SERVERS)).
+
+draw_link_cut_marker(DC, X1, Y1, X2, Y2) ->
+    MX = (X1 + X2) div 2,
+    MY = (Y1 + Y2) div 2,
+    S = 8,
+    dc_drawLine(DC, MX - S, MY - S, MX + S, MY + S),
+    dc_drawLine(DC, MX - S, MY + S, MX + S, MY - S).
 
 draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
     SolidPen = wxPen:new({60, 60, 60}, [{width, 1}]),
@@ -1040,4 +1090,72 @@ pick_server({X, Y}, {W, H, CX, CY, R}, DefaultSelected) ->
 dist2(X1, Y1, X2, Y2) ->
     DX = X1 - X2,
     DY = Y1 - Y2,
+    DX * DX + DY * DY.
+
+%% --- Net split UI: click a link to toggle it -------------------------------
+
+pick_link({X, Y}, {_W, _H, CX, CY, R}, _Model) ->
+    Positions = server_positions(CX, CY, R),
+    %% How close the click must be to the line segment.
+    Th = 10,
+    %% Ignore clicks that are too close to either endpoint so node selection
+    %% wins near the circles.
+    EndEx = 45,
+    {Best, BestD} =
+        lists:foldl(fun({I, J}, {Best0, BestD0}) ->
+                       {X1, Y1} = maps:get(I, Positions),
+                       {X2, Y2} = maps:get(J, Positions),
+                       %% Endpoint exclusion
+                       case dist2(X, Y, X1, Y1) =< EndEx * EndEx
+                            orelse dist2(X, Y, X2, Y2) =< EndEx * EndEx
+                       of
+                           true ->
+                               {Best0, BestD0};
+                           false ->
+                               D = dist2_point_segment(X, Y, X1, Y1, X2, Y2),
+                               if D < BestD0 ->
+                                      {{I, J}, D};
+                                  true ->
+                                      {Best0, BestD0}
+                               end
+                       end
+                    end,
+                    {none, 1.0e18},
+                    all_pairs(?NUM_SERVERS)),
+    case Best of
+        none ->
+            none;
+        {A, B} ->
+            %% If we're close enough to the segment, treat it as a hit.
+            case BestD =< Th * Th of
+                true ->
+                    {A, B};
+                false ->
+                    none
+            end
+    end.
+
+all_pairs(N) ->
+    [{I, J} || I <- lists:seq(1, N), J <- lists:seq(I + 1, N)].
+
+dist2_point_segment(PX, PY, X1, Y1, X2, Y2) ->
+    VX = X2 - X1,
+    VY = Y2 - Y1,
+    WX = PX - X1,
+    WY = PY - Y1,
+    Len2 = VX * VX + VY * VY,
+    case Len2 of
+        0 ->
+            dist2(PX, PY, X1, Y1);
+        _ ->
+            T0 = (WX * VX + WY * VY) / Len2,
+            T = clamp(T0, 0.0, 1.0),
+            CX = X1 + T * VX,
+            CY = Y1 + T * VY,
+            dist2f(PX, PY, CX, CY)
+    end.
+
+dist2f(PX, PY, X2, Y2) ->
+    DX = PX - X2,
+    DY = PY - Y2,
     DX * DX + DY * DY.

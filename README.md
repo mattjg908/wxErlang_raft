@@ -35,6 +35,11 @@ Close the window to stop the GUI process; the shell will remain open.
 - **Timeout**: force a selected server to start an election immediately
 - **Stop / Resume / Restart**: change selected server's liveness
 - **Align timers / Spread timers**: mimic RaftScope's "encourage split vote" tools
+- **Heal all links**: restore communication on every link (clears all net cuts)
 - **Speed** slider: simulation speed multiplier
 
 Click a server node to select it.
+
+## Network splits
+- **Click a link (line) between two servers** to toggle communication on that link (cut/heal).
+  Cut links are drawn in red with an "X".
