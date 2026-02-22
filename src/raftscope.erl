@@ -310,9 +310,12 @@ become_leader(M = #model{time = Time}, S) ->
     Votes = count_true(maps:values(S#server.vote_granted)) + 1,
     case S#server.state =:= candidate andalso Votes > ?NUM_SERVERS div 2 of
         true ->
-            LogLen = length(S#server.log),
+            Noop = #entry{term = S#server.term, value = noop},
+            Log1 = S#server.log ++ [Noop],
+            LogLen = length(Log1),
             Peers = S#server.peers,
             S1 = S#server{state = leader,
+                          log = Log1,
                           next_index = make_map(Peers, LogLen + 1),
                           rpc_due = make_map(Peers, ?INF),
                           heartbeat_due = make_map(Peers, 0),
