@@ -512,7 +512,9 @@ handle_append_entries_request(M0, S0, Req) ->
                     true ->
                         Entries = maps:get(entries, Req),
                         {Log2, LastIdx} = append_entries(Sx#server.log, PrevIndex, Entries),
-                        Commit2 = erlang:max(Sx#server.commit_index, maps:get(commit_index, Req)),
+                        LeaderCommit = maps:get(commit_index, Req),
+                        CommitCap = erlang:min(LeaderCommit, length(Log2)),
+                        Commit2 = erlang:max(Sx#server.commit_index, CommitCap),
                         {true, LastIdx, Sx#server{log = Log2, commit_index = Commit2}}
                 end
         end,
