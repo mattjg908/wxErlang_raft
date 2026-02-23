@@ -383,16 +383,9 @@ send_append_entries(M = #model{time = Time}, S, Peer) ->
                 true ->
                     PrevIndex = NextIndex - 1,
                     LastIndex0 = erlang:min(PrevIndex + ?BATCH_SIZE, LogLen),
-                    MatchIndex = maps:get(Peer, S#server.match_index),
-                    LastIndex =
-                        case MatchIndex + 1 < NextIndex of
-                            true ->
-                                PrevIndex;   %% heartbeat only
-                            false ->
-                                LastIndex0
-                        end,
+                    LastIndex = LastIndex0,
                     Entries = log_slice(S#server.log, PrevIndex, LastIndex),
-                    CommitForPeer = erlang:min(S#server.commit_index, LastIndex),
+                    CommitForPeer = S#server.commit_index,
 
                     Req = #{from => S#server.id,
                             to => Peer,
