@@ -29,6 +29,10 @@
         {time = 0,                      %% microseconds
          servers = [],                  %% [#server{}]
          messages = [],                 %% [map()]
+         %% Toggle to match upstream raftscope.js behavior (no automatic leader
+         %% no-op entry) vs a common Raft implementation choice (append no-op
+         %% on election). Default preserves current behavior.
+         append_noop_on_election = true,
          %% Network partitions / link cuts.
          %% Keys are {MinId, MaxId} for undirected links.
          %% If a key exists, communication on that link is dropped.

@@ -15,6 +15,7 @@
          canvas,
          info_txt,
          btn_run,
+         btn_noop,
          running = true,
          speed = 20,            %% 1..200
          selected = 1,
@@ -31,6 +32,7 @@
 -define(ID_SPREAD, 1009).
 -define(ID_SPEED, 1010).
 -define(ID_HEALALL, 1011).
+-define(ID_NOOP, 1012).
 
 start_link() ->
     %% wx_object:start_link/* returns a wxWindow (wx_ref), not {ok,Pid}.
@@ -183,6 +185,7 @@ init([]) ->
     BtnAlign = mk_button(Sidebar, ?ID_ALIGN, "Align timers"),
     BtnSpread = mk_button(Sidebar, ?ID_SPREAD, "Spread timers"),
     BtnHealAll = mk_button(Sidebar, ?ID_HEALALL, "Heal all links"),
+    BtnNoop = mk_button(Sidebar, ?ID_NOOP, "Leader no-op: ON"),
 
     lists:foreach(fun(B) -> wxSizer:add(BtnGrid, B, [{flag, ?wxEXPAND}, {proportion, 1}]) end,
                   [BtnRun,
@@ -194,7 +197,8 @@ init([]) ->
                    BtnRestart,
                    BtnAlign,
                    BtnSpread,
-                   BtnHealAll]),
+                   BtnHealAll,
+                   BtnNoop]),
 
     wxSizer:add(Sizer,
                 BtnGrid,
@@ -231,6 +235,7 @@ init([]) ->
                    {BtnAlign, command_button_clicked},
                    {BtnSpread, command_button_clicked},
                    {BtnHealAll, command_button_clicked},
+                   {BtnNoop, command_button_clicked},
                    {Speed, command_slider_updated}]),
 
     wxFrame:show(Frame),
@@ -241,10 +246,12 @@ init([]) ->
     St0 = #st{frame = Frame,
               canvas = Canvas,
               info_txt = Info,
-              btn_run = BtnRun},
+              btn_run = BtnRun,
+              btn_noop = BtnNoop},
 
-    St1 = refresh_info(St0),
-    {Frame, St1}.
+    St1 = refresh_noop_button_label(St0),
+    St2 = refresh_info(St1),
+    {Frame, St2}.
 
 handle_call(_Req, _From, St) ->
     {reply, ok, St}.
@@ -308,6 +315,9 @@ handle_event(#wx{id = ?ID_HEALALL, event = #wxCommand{type = command_button_clic
              St) ->
     St1 = apply_model(St, fun(M) -> raftscope:heal_all_links(M) end),
     {noreply, St1};
+handle_event(#wx{id = ?ID_NOOP, event = #wxCommand{type = command_button_clicked}}, St) ->
+    St1 = apply_model(St, fun(M) -> raftscope:toggle_append_noop_on_election(M) end),
+    {noreply, refresh_noop_button_label(St1)};
 handle_event(#wx{id = ?ID_SPEED,
                  event = #wxCommand{type = command_slider_updated, commandInt = V}},
              St) ->
@@ -397,12 +407,20 @@ refresh_info(St) ->
                     io_lib:format("S~p (term ~p)", [LId, LTerm]))
         end,
     CutsTxt = cuts_text(Cuts),
+    NoopMode =
+        case raftscope:append_noop_on_election(St#st.model) of
+            true ->
+                "on";
+            false ->
+                "off"
+        end,
     Txt =
-        io_lib:format("time: ~p us~nleader: ~s~nmessages_in_flight: ~p~nnet_cuts: ~s~n~nselected: S~p~nstate: ~p~nterm: ~p~nvoted_for: ~p~nlog_len: ~p~ncommit_index: ~p~nelection_due_in: ~p us~n~nservers:~n~s",
+        io_lib:format("time: ~p us~nleader: ~s~nmessages_in_flight: ~p~nnet_cuts: ~s~nleader_noop_on_election: ~s~n~nselected: S~p~nstate: ~p~nterm: ~p~nvoted_for: ~p~nlog_len: ~p~ncommit_index: ~p~nelection_due_in: ~p us~n~nservers:~n~s",
                       [T,
                        LeaderTxt,
                        length(Ms),
                        CutsTxt,
+                       NoopMode,
                        Sel,
                        SelS#server.state,
                        SelS#server.term,
@@ -412,6 +430,17 @@ refresh_info(St) ->
                        erlang:max(0, SelS#server.election_alarm - T),
                        servers_summary(Ss, T)]),
     wxTextCtrl:setValue(St#st.info_txt, lists:flatten(Txt)),
+    St.
+
+refresh_noop_button_label(St = #st{btn_noop = Btn}) ->
+    Label =
+        case raftscope:append_noop_on_election(St#st.model) of
+            true ->
+                "Leader no-op: ON";
+            false ->
+                "Leader no-op: OFF"
+        end,
+    catch wxButton:setLabel(Btn, Label),
     St.
 
 cuts_text(Cuts) when is_map(Cuts) ->
@@ -685,10 +714,17 @@ draw_link_cut_marker(DC, X1, Y1, X2, Y2) ->
     dc_drawLine(DC, MX - S, MY + S, MX + S, MY - S).
 
 draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
-    SolidPen = wxPen:new({60, 60, 60}, [{width, 1}]),
-    SolidBrush = wxBrush:new({60, 60, 60}),
-    %% RaftScope uses a circled-plus glyph for successful replies.
-    OutlinePen = wxPen:new({60, 60, 60}, [{width, 1}]),
+    %% Match upstream RaftScope message coloring more closely:
+    %%   RequestVote = green, AppendEntries = orange.
+    VoteCol = {102, 194, 165},
+    AppendCol = {252, 141, 98},
+    FallbackCol = {60, 60, 60},
+    VotePen = wxPen:new(VoteCol, [{width, 1}]),
+    VoteBrush = wxBrush:new(VoteCol),
+    AppendPen = wxPen:new(AppendCol, [{width, 1}]),
+    AppendBrush = wxBrush:new(AppendCol),
+    FallbackPen = wxPen:new(FallbackCol, [{width, 1}]),
+    FallbackBrush = wxBrush:new(FallbackCol),
     %% Use the canvas background color as the fill so this works across
     %% wx/OTP builds without depending on a transparent-brush constant.
     HollowBrush = wxBrush:new({245, 245, 245}),
@@ -707,35 +743,66 @@ draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
                              {X2, Y2} = maps:get(To, Positions),
                              X = trunc(X1 + (X2 - X1) * P2),
                              Y = trunc(Y1 + (Y2 - Y1) * P2),
-                             case is_success_reply(Msg) of
-                                 true ->
-                                     dc_setPen(DC, OutlinePen),
+                             {Pen, Brush} =
+                                 case maps:get(type, Msg, undefined) of
+                                     request_vote ->
+                                         {VotePen, VoteBrush};
+                                     append_entries ->
+                                         {AppendPen, AppendBrush};
+                                     _ ->
+                                         {FallbackPen, FallbackBrush}
+                                 end,
+                             case reply_status(Msg) of
+                                 none ->
+                                     dc_setPen(DC, Pen),
+                                     dc_setBrush(DC, Brush),
+                                     dc_drawCircle(DC, X, Y, 4);
+                                 success ->
+                                     dc_setPen(DC, Pen),
                                      dc_setBrush(DC, HollowBrush),
                                      dc_drawCircle(DC, X, Y, 5),
                                      draw_plus(DC, X, Y, 3);
-                                 false ->
-                                     dc_setPen(DC, SolidPen),
-                                     dc_setBrush(DC, SolidBrush),
-                                     dc_drawCircle(DC, X, Y, 4)
+                                 failure ->
+                                     dc_setPen(DC, Pen),
+                                     dc_setBrush(DC, HollowBrush),
+                                     dc_drawCircle(DC, X, Y, 5),
+                                     draw_minus(DC, X, Y, 3)
                              end
                      end
                   end,
                   Ms).
 
-is_success_reply(Msg) ->
-    maps:get(direction, Msg, request) =:= reply
-    andalso case maps:get(type, Msg, undefined) of
+reply_status(Msg) ->
+    case maps:get(direction, Msg, request) of
+        reply ->
+            case maps:get(type, Msg, undefined) of
                 request_vote ->
-                    maps:get(granted, Msg, false) =:= true;
+                    case maps:get(granted, Msg, false) of
+                        true ->
+                            success;
+                        false ->
+                            failure
+                    end;
                 append_entries ->
-                    maps:get(success, Msg, false) =:= true;
+                    case maps:get(success, Msg, false) of
+                        true ->
+                            success;
+                        false ->
+                            failure
+                    end;
                 _ ->
-                    false
-            end.
+                    failure
+            end;
+        _ ->
+            none
+    end.
 
 draw_plus(DC, X, Y, HalfLen) ->
     dc_drawLine(DC, X - HalfLen, Y, X + HalfLen, Y),
     dc_drawLine(DC, X, Y - HalfLen, X, Y + HalfLen).
+
+draw_minus(DC, X, Y, HalfLen) ->
+    dc_drawLine(DC, X - HalfLen, Y, X + HalfLen, Y).
 
 draw_servers(DC, #model{time = Now, servers = Ss}, Positions, Selected) ->
     VisibleLeader = choose_visible_leader(Ss),

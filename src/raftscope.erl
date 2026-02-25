@@ -7,7 +7,9 @@
 
 -export([new/0, tick/2, tick_n/3, update/1, leader/1, stop/2, resume/2, restart/2,
          resume_all/1, timeout/2, client_request/2, spread_timers/1, align_timers/1, is_link_cut/3,
-         cut_links/1, cut_link/3, heal_link/3, toggle_link/3, heal_all_links/1]).
+         cut_links/1, cut_link/3, heal_link/3, toggle_link/3, heal_all_links/1,
+         append_noop_on_election/1, set_append_noop_on_election/2,
+         toggle_append_noop_on_election/1]).
 
          %% Network partitions / net splits
 
@@ -53,6 +55,15 @@ new() ->
     #model{time = 0,
            servers = Servers,
            messages = []}.
+
+append_noop_on_election(#model{append_noop_on_election = V}) ->
+    V.
+
+set_append_noop_on_election(M0, V) when is_boolean(V) ->
+    M0#model{append_noop_on_election = V}.
+
+toggle_append_noop_on_election(M0 = #model{append_noop_on_election = V}) ->
+    M0#model{append_noop_on_election = not V}.
 
 tick(Model0, DeltaMicros) when is_integer(DeltaMicros), DeltaMicros >= 0 ->
     Model1 = Model0#model{time = Model0#model.time + DeltaMicros},
@@ -306,13 +317,19 @@ start_new_election(M = #model{time = Time}, S) ->
             {S, M}
     end.
 
-become_leader(M = #model{time = Time}, S) ->
+become_leader(M = #model{time = Time, append_noop_on_election = AppendNoop}, S) ->
     Votes = count_true(maps:values(S#server.vote_granted)) + 1,
     case S#server.state =:= candidate andalso Votes > ?NUM_SERVERS div 2 of
         true ->
-            Noop = #entry{term = S#server.term, value = noop},
-            Log1 = S#server.log ++ [Noop],
-            LogLen = length(Log1),
+            {Log1, LogLen} =
+                case AppendNoop of
+                    true ->
+                        Noop = #entry{term = S#server.term, value = noop},
+                        LogX = S#server.log ++ [Noop],
+                        {LogX, length(LogX)};
+                    false ->
+                        {S#server.log, length(S#server.log)}
+                end,
             Peers = S#server.peers,
             S1 = S#server{state = leader,
                           log = Log1,
