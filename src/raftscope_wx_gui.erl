@@ -716,13 +716,17 @@ draw_link_cut_marker(DC, X1, Y1, X2, Y2) ->
 draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
     %% Match upstream RaftScope message coloring more closely:
     %%   RequestVote = green, AppendEntries = orange.
+    %% Highlight leader no-op AppendEntries separately so they are easy to spot.
     VoteCol = {102, 194, 165},
     AppendCol = {252, 141, 98},
+    AppendNoopCol = {141, 160, 203},
     FallbackCol = {60, 60, 60},
     VotePen = wxPen:new(VoteCol, [{width, 1}]),
     VoteBrush = wxBrush:new(VoteCol),
     AppendPen = wxPen:new(AppendCol, [{width, 1}]),
     AppendBrush = wxBrush:new(AppendCol),
+    AppendNoopPen = wxPen:new(AppendNoopCol, [{width, 1}]),
+    AppendNoopBrush = wxBrush:new(AppendNoopCol),
     FallbackPen = wxPen:new(FallbackCol, [{width, 1}]),
     FallbackBrush = wxBrush:new(FallbackCol),
     %% Use the canvas background color as the fill so this works across
@@ -744,10 +748,12 @@ draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
                              X = trunc(X1 + (X2 - X1) * P2),
                              Y = trunc(Y1 + (Y2 - Y1) * P2),
                              {Pen, Brush} =
-                                 case maps:get(type, Msg, undefined) of
-                                     request_vote ->
+                                 case {maps:get(type, Msg, undefined), append_entries_kind(Msg)} of
+                                     {request_vote, _} ->
                                          {VotePen, VoteBrush};
-                                     append_entries ->
+                                     {append_entries, noop} ->
+                                         {AppendNoopPen, AppendNoopBrush};
+                                     {append_entries, _} ->
                                          {AppendPen, AppendBrush};
                                      _ ->
                                          {FallbackPen, FallbackBrush}
@@ -767,10 +773,65 @@ draw_messages(DC, #model{time = Now, messages = Ms}, Positions) ->
                                      dc_setBrush(DC, HollowBrush),
                                      dc_drawCircle(DC, X, Y, 5),
                                      draw_minus(DC, X, Y, 3)
-                             end
+                             end,
+                             maybe_draw_message_badge(DC, X, Y, message_badge_label(Msg))
                      end
                   end,
                   Ms).
+
+append_entries_kind(Msg) ->
+    case {maps:get(type, Msg, undefined), maps:get(direction, Msg, request)} of
+        {append_entries, request} ->
+            case maps:get(entries, Msg, undefined) of
+                Entries when is_list(Entries) ->
+                    case Entries of
+                        [] ->
+                            heartbeat;
+                        _ ->
+                            case entries_contains_noop(Entries) of
+                                true ->
+                                    noop;
+                                false ->
+                                    data
+                            end
+                    end;
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
+
+entries_contains_noop(Entries) ->
+    lists:any(fun(E) ->
+                 case E of
+                     #entry{value = noop} ->
+                         true;
+                     #{value := noop} ->
+                         true;
+                     _ ->
+                         false
+                 end
+              end,
+              Entries).
+
+message_badge_label(Msg) ->
+    case append_entries_kind(Msg) of
+        heartbeat ->
+            "AE (hb)";
+        noop ->
+            "AE (noop)";
+        data ->
+            "AE (data)";
+        _ ->
+            undefined
+    end.
+
+maybe_draw_message_badge(_DC, _X, _Y, undefined) ->
+    ok;
+maybe_draw_message_badge(DC, X, Y, Label) ->
+    dc_setTextForeground(DC, {30, 30, 30}),
+    dc_drawText(DC, Label, X + 7, Y - 8).
 
 reply_status(Msg) ->
     case maps:get(direction, Msg, request) of
